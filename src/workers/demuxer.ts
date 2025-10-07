@@ -95,10 +95,8 @@ const getBufLen = (bufs: Uint8Array[]) => bufs.reduce((sum, buf) => sum + buf.le
 type StreamMap = Record<number, { bufs: Uint8Array[]; pesLength: number; timestamp: number; }>;
 
 export const openFile = async function(file: File, port: MessagePort) {
-    // const ctx = canvas.getContext('2d');
-    // if (!ctx) return false;
-
     let audioOffset = 0;
+    let firstVideoTimestamp: number;
 
     const config: VideoDecoderConfig = {
         codec: 'avc1.640829',
@@ -120,7 +118,6 @@ export const openFile = async function(file: File, port: MessagePort) {
     decoder.configure(config);
 
     const streamMap: StreamMap = {};
-    let first = true;
     const newFrame = async (pid: number) => {
         const bufLen = getBufLen(streamMap[pid].bufs);
         // console.log(`PES complete (${bufLen} bytes)`);
@@ -132,18 +129,22 @@ export const openFile = async function(file: File, port: MessagePort) {
         }, 0);
         
         if (pid === VIDEO_PID) {
-            // console.log(streamMap[pid].timestamp);
             const psDetected = checkPsData(data);
-            if (psDetected && !first)
+            if (!firstVideoTimestamp && !psDetected) {
+                streamMap[pid].bufs.length = 0;
+                return;
+            } else if (!firstVideoTimestamp && psDetected) {
+                firstVideoTimestamp = streamMap[pid].timestamp;
+            } else if (firstVideoTimestamp && psDetected) {
                 await decoder.flush();
-            else if (psDetected)
-                first = false;
+            }
+
             const chunk = new EncodedVideoChunk({
                 type: 'key', timestamp: streamMap[pid].timestamp, data
             });
             decoder.decode(chunk);
         }
-        if (pid === 0x1100) {
+        if (pid === 0x1100 && streamMap[pid].timestamp >= firstVideoTimestamp) {
             // const channelLayout = channelLayouts[data[2] >> 4];
             // const bitsPerCodedSample = bitsPerSamples[data[3] >> 6];
             // const sampleFmt = bitsPerCodedSample === 16 ? 's16' : 's32';
@@ -161,7 +162,12 @@ export const openFile = async function(file: File, port: MessagePort) {
                 fArr[i] = ((val & 2**23) ? val - 2**24 : val) / 2**23;
             }
 
-            port.postMessage({ timestamp: streamMap[pid].timestamp, audioOffset, data: fArr }, [fArr.buffer]);
+            port.postMessage({ 
+                data: fArr,
+                timestamp: streamMap[pid].timestamp, 
+                audioOffset, 
+            }, [fArr.buffer]);
+
             audioOffset += arr.length / 6;
         }
         
@@ -170,10 +176,12 @@ export const openFile = async function(file: File, port: MessagePort) {
 
     const numChunks = Math.ceil(file.size / MAX_BUF_SIZE);
     for (let i = 0; i < numChunks; i++) {
+        if (i < 0) continue;
         const chunk = await file.slice(
             i * MAX_BUF_SIZE, i < numChunks - 1 ? (i + 1) * MAX_BUF_SIZE : undefined
         ).arrayBuffer();
         for (let j = 0; j < chunk.byteLength / PACKET_SIZE; j++) {
+            if (i === 0 && j < 0) continue;
             const packet = chunk.slice(j * PACKET_SIZE, (j + 1) * PACKET_SIZE);
             const p = new Uint8Array(packet);
 

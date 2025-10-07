@@ -10,9 +10,12 @@ const CHANNELS = 2;
 
 const fileSystemAPIFullSupport = !!window.showOpenFilePicker;
 
-const instance = new ComlinkWorker<typeof import('./workers/worker')>(
-    new URL('./workers/worker', import.meta.url),
-    { type: 'module' }
+const { openFile } = new ComlinkWorker<typeof import('./workers/demuxer')>(
+    new URL('./workers/demuxer', import.meta.url), { type: 'module' }
+);
+
+const { render } = new ComlinkWorker<typeof import('./workers/renderer')>(
+    new URL('./workers/renderer', import.meta.url), { type: 'module' }
 );
 
 const getInputFile = () => new Promise<File>((resolve, reject) => {
@@ -46,33 +49,16 @@ const App = function() {
     const [ready, setReady] = useState(false);
     const canvasEl = useRef<HTMLCanvasElement>(null);
     const audioCtx = useRef<AudioContext | null>(null);
-    const pendingFrames = useRef<VideoFrame[]>([]);
-    const startTimestamp = useRef(0);
-
-    const animate = () => {
-        const { contextTime } = (audioCtx.current?.getOutputTimestamp() ?? {});
-        const ctx = canvasEl.current?.getContext('2d');
-        if (!ctx) throw new Error('Canvas not ready.');
-        let frame: VideoFrame | undefined;
-        do {
-            frame = pendingFrames.current[0];
-            if (!frame || !contextTime 
-                || frame.timestamp - startTimestamp.current - (contextTime * 90000) > 3750
-            ) break;
-            ctx.drawImage(frame, 0, 0);
-            frame.close();
-            pendingFrames.current.shift();
-        } while (frame.timestamp - startTimestamp.current < contextTime * 90000);
-
-        requestAnimationFrame(animate);
-    }
-
+    
     const getFile = () => (fileSystemAPIFullSupport ? getFilePicker : getInputFile)()
         .then(async file => {
-            if (!file) throw new Error('File not accessible.');
-            // const canvas = canvasEl.current?.transferControlToOffscreen();
-            // if (!canvas) throw new Error('Canvas not ready.');
-            const channel = new MessageChannel();
+            if (!file) return false;
+
+            const canvas = canvasEl.current?.transferControlToOffscreen();
+            if (!canvas) return false;
+
+            const demuxChannel = new MessageChannel();
+            const renderChannel = new MessageChannel();
 
             audioCtx.current = new AudioContext();
             const audioBuf = audioCtx.current.createBuffer(CHANNELS, SAMPLE_RATE * DURATION, SAMPLE_RATE);
@@ -81,34 +67,44 @@ const App = function() {
             source.buffer = audioBuf;
             source.connect(audioCtx.current.destination);
 
+            render(
+                transfer(canvas, [canvas]), 
+                transfer(renderChannel.port2, [renderChannel.port2])
+            );
+
+            renderChannel.port1.onmessage = () => {
+                renderChannel.port1.postMessage(
+                    audioCtx.current?.getOutputTimestamp().contextTime ?? 0
+                );
+            };
+
             let start = false;
-            channel.port1.onmessage = function(e: MessageEvent<{
+            demuxChannel.port1.onmessage = function(e: MessageEvent<{
                 data: Float32Array | VideoFrame;
                 timestamp?: number;
                 audioOffset?: number;
             }>) {
                 const { timestamp, audioOffset, data } = e.data;
                 if (data instanceof VideoFrame) {
-                    if (!startTimestamp.current)
-                        startTimestamp.current = data.timestamp;
-                    pendingFrames.current.push(data);
+                    renderChannel.port1.postMessage(data, [data]);
                 } else {
                     if (!audioOffset || !timestamp) return;
                     
                     data.forEach((val, i) => {
                         channelBufs[i % CHANNELS][audioOffset + Math.floor(i / 2)] = val;
                     });
-                }
 
-                if (!start) {
-                    requestAnimationFrame(animate);
-                    source.start();
-                    start = true;
+                    if (!start) {
+                        renderChannel.port1.postMessage(timestamp);
+                        source.start();
+                        setReady(true);
+                        start = true;
+                    }
                 }
             }
             
-            return instance.openFile(file, transfer(channel.port2, [channel.port2]));
-        }).then(setReady);
+            return openFile(file, transfer(demuxChannel.port2, [demuxChannel.port2]));
+        });
 
     return (<>
         <Backdrop
