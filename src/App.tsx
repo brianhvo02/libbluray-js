@@ -3,6 +3,10 @@ import './App.scss';
 import { Backdrop, Button, Card, CardActions, CardContent, Link, Typography } from '@mui/material';
 import { get, set } from 'idb-keyval';
 import { transfer } from 'comlink';
+import workerUrl from 'libass-wasm/dist/js/subtitles-octopus-worker.js?url';
+
+// @ts-expect-error SubtitlesOctopus has no types
+import SubtitlesOctopus from 'libass-wasm';
 
 const SAMPLE_RATE = 48000;
 const DURATION = 1436.105;
@@ -47,14 +51,40 @@ const getFilePicker = async function() {
 
 const App = function() {
     const [ready, setReady] = useState(false);
-    const canvasEl = useRef<HTMLCanvasElement>(null);
+    const rendererEl = useRef<HTMLCanvasElement>(null);
+    const subtitleEl = useRef<HTMLCanvasElement>(null);
     const audioCtx = useRef<AudioContext | null>(null);
-    
+    const instance = useRef<unknown>(null);
+
+    const getSubsFolder = async () => {
+        const dhOld = await get<FileSystemDirectoryHandle>('subsDir');
+        const dh = dhOld ?? await showDirectoryPicker();
+        if (!dhOld)
+            await set('subsDir', dh);
+        const attachmentsDir = await dh.getDirectoryHandle('attachments');
+        const fonts = await Array.fromAsync(attachmentsDir.values())
+            .then(files => Promise.all(files.map(async fh => {
+                if (fh instanceof FileSystemDirectoryHandle)
+                    return '';
+
+                const file = await fh.getFile();
+                return URL.createObjectURL(file);
+            })));
+        const subsFh = await dh.getFileHandle('track4.eng.ass');
+        const subsFile = await subsFh.getFile();
+        const subUrl = URL.createObjectURL(subsFile);
+
+        instance.current = new SubtitlesOctopus({
+            canvas: subtitleEl.current,
+            subUrl, fonts, workerUrl,
+        });
+    }
+
     const getFile = () => (fileSystemAPIFullSupport ? getFilePicker : getInputFile)()
         .then(async file => {
             if (!file) return false;
 
-            const canvas = canvasEl.current?.transferControlToOffscreen();
+            const canvas = rendererEl.current?.transferControlToOffscreen();
             if (!canvas) return false;
 
             const demuxChannel = new MessageChannel();
@@ -65,6 +95,7 @@ const App = function() {
             const channelBufs = [...Array(CHANNELS).keys()].map(i => audioBuf.getChannelData(i));
             const source = audioCtx.current.createBufferSource();
             source.buffer = audioBuf;
+            source.loop = true;
             source.connect(audioCtx.current.destination);
 
             render(
@@ -73,9 +104,10 @@ const App = function() {
             );
 
             renderChannel.port1.onmessage = () => {
-                renderChannel.port1.postMessage(
-                    audioCtx.current?.getOutputTimestamp().contextTime ?? 0
-                );
+                const time = audioCtx.current ? audioCtx.current.currentTime : 0;
+                if (instance.current)
+                    (instance.current as { setCurrentTime: (arg0: number) => void }).setCurrentTime(time);
+                renderChannel.port1.postMessage(time);
             };
 
             let start = false;
@@ -88,10 +120,12 @@ const App = function() {
                 if (data instanceof VideoFrame) {
                     renderChannel.port1.postMessage(data, [data]);
                 } else {
-                    if (!audioOffset || !timestamp) return;
+                    if (typeof audioOffset !== 'number' || !timestamp || !audioCtx.current) return;
                     
                     data.forEach((val, i) => {
-                        channelBufs[i % CHANNELS][audioOffset + Math.floor(i / 2)] = val;
+                        channelBufs[i % CHANNELS][
+                            (audioOffset + Math.floor(i / 2)) % (SAMPLE_RATE * DURATION)
+                        ] = val;
                     });
 
                     if (!start) {
@@ -128,10 +162,12 @@ const App = function() {
                 </CardContent>
                 <CardActions>
                     <Button onClick={getFile}>Open file</Button>
+                    <Button onClick={getSubsFolder}>Open subtitle folder</Button>
                 </CardActions>
             </Card>
         </Backdrop>
-        <canvas ref={canvasEl} width={1920} height={1080} />
+        <canvas ref={rendererEl} width={1920} height={1080} />
+        <canvas ref={subtitleEl} width={1920} height={1080} />
     </>);
 }
 

@@ -3,7 +3,16 @@ html, body, #root {
     width: 100%;
 }
 
+#root {
+    position: relative;
+}
+
 canvas {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+
     height: auto;
     width: auto;
 

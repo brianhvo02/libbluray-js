@@ -1,0 +1,3 @@
+[submodule "libflac/flac"]
+	path = libflac/flac
+	url = https://github.com/xiph/flac

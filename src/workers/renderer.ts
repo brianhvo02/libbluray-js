@@ -6,23 +6,11 @@ export const render = async function(canvas: OffscreenCanvas, port: MessagePort)
     let audioStartTimestamp: number;
     let audioTimestamp: number;
     const pendingFrames: VideoFrame[] = [];
-
-    port.onmessage = (e: MessageEvent<VideoFrame | number>) => {
-        if (typeof e.data === 'number') {
-            if (!audioStartTimestamp)
-                audioStartTimestamp = e.data;
-            else audioTimestamp = e.data;
-        } else {
-            if (!videoStartTimestamp)
-                videoStartTimestamp = e.data.timestamp;
-            pendingFrames.push(e.data);
-        }
-    };
     
     const animate = () => {
         let frame: VideoFrame | undefined;
 
-        if (!videoStartTimestamp || !audioStartTimestamp)
+        if (!videoStartTimestamp)
             return requestAnimationFrame(animate);
         port.postMessage(true);
         if (!audioTimestamp)
@@ -40,5 +28,17 @@ export const render = async function(canvas: OffscreenCanvas, port: MessagePort)
         requestAnimationFrame(animate);
     }
 
-    requestAnimationFrame(animate);
+    port.onmessage = (e: MessageEvent<VideoFrame | number>) => {
+        if (e.data instanceof VideoFrame) {
+            if (!videoStartTimestamp) {
+                videoStartTimestamp = e.data.timestamp;
+                requestAnimationFrame(animate);
+            }
+            pendingFrames.push(e.data);
+        } else {
+            if (!audioStartTimestamp) {
+                audioStartTimestamp = e.data;
+            } else audioTimestamp = e.data;
+        }
+    };
 };
